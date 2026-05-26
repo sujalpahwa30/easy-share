@@ -1,0 +1,21 @@
+{
+  "name": "easyshare-classroom-share",
+  "version": "1.0.0",
+  "description": "No-login QR based file transfer for projector and classroom workflows.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "smoke:signaling": "node scripts/smoke-signaling.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^5.2.1",
+    "helmet": "^8.2.0",
+    "multer": "^2.1.1",
+    "qrcode": "^1.5.4",
+    "ws": "^8.21.0"
+  }
+}

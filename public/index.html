@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>EasyShare</title>
+    <script>
+      try {
+        const savedTheme = localStorage.getItem("easyshare-theme");
+        const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.dataset.theme = savedTheme || (prefersDark ? "dark" : "light");
+      } catch (_error) {
+        document.documentElement.dataset.theme = "light";
+      }
+    </script>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell projector">
+      <section class="topbar">
+        <div class="brand-block">
+          <div class="brand-mark" aria-hidden="true">
+            <span></span>
+          </div>
+          <div>
+            <p class="eyebrow">EasyShare</p>
+            <h1>Send files to this screen.</h1>
+          </div>
+        </div>
+        <div class="top-actions">
+          <button class="icon-button secondary" type="button" data-theme-toggle title="Switch theme" aria-label="Switch theme">
+            <span class="theme-glyph" aria-hidden="true"></span>
+          </button>
+          <button id="copyLink" class="icon-button secondary" title="Copy room link" aria-label="Copy room link">
+            <span class="copy-glyph" aria-hidden="true"></span>
+          </button>
+          <button id="newRoom" class="icon-button" title="Start a new room" aria-label="Start a new room">
+            <span aria-hidden="true">+</span>
+          </button>
+        </div>
+      </section>
+
+      <section class="room-layout">
+        <aside class="qr-panel">
+          <div class="qr-frame">
+            <img id="qr" alt="QR code to join this transfer room" />
+            <div class="scan-pulse" aria-hidden="true"></div>
+          </div>
+          <div class="room-code">
+            <span>Room code</span>
+            <strong id="roomCode">------</strong>
+          </div>
+          <div class="meta-grid">
+            <div>
+              <span>Mode</span>
+              <strong id="modeLabel">Direct first</strong>
+            </div>
+            <div>
+              <span>Expires</span>
+              <strong id="expiresIn">--:--</strong>
+            </div>
+          </div>
+          <p id="joinUrl" class="join-url"></p>
+        </aside>
+
+        <section class="transfer-panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Transfers</p>
+              <h2>Ready on this screen</h2>
+            </div>
+            <div class="status-stack">
+              <span id="status" class="status">Starting</span>
+              <span id="peerStatus" class="substatus">Starting room</span>
+            </div>
+          </div>
+
+          <div id="transferStage" class="transfer-stage idle" aria-live="polite">
+            <div class="share-orbit" aria-hidden="true">
+              <span class="orbit-dot dot-a"></span>
+              <span class="orbit-dot dot-b"></span>
+              <span class="orbit-dot dot-c"></span>
+              <span class="screen-core"></span>
+            </div>
+            <div>
+              <strong id="stageTitle">Waiting for files</strong>
+              <span id="stageDetail">Scan the QR code from another device</span>
+            </div>
+          </div>
+
+          <div id="files" class="file-list empty">
+            <p>No files yet.</p>
+          </div>
+        </section>
+      </section>
+    </main>
+    <script src="/theme.js"></script>
+    <script src="/receiver.js"></script>
+  </body>
+</html>
