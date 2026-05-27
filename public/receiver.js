@@ -12,7 +12,7 @@ const transferStage = document.querySelector("#transferStage");
 const stageTitle = document.querySelector("#stageTitle");
 const stageDetail = document.querySelector("#stageDetail");
 
-const iceServers = [{ urls: "stun:stun.l.google.com:19302" }];
+let iceServers = [{ urls: "stun:stun.l.google.com:19302" }];
 
 let socket;
 let currentRoom;
@@ -48,6 +48,19 @@ function setStage(state, title, detail) {
 function socketSend(message) {
   if (socket && socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify(message));
+  }
+}
+
+async function loadConnectionConfig() {
+  try {
+    const response = await fetch("/api/config");
+    if (!response.ok) return;
+    const config = await response.json();
+    if (Array.isArray(config.iceServers) && config.iceServers.length) {
+      iceServers = config.iceServers;
+    }
+  } catch (_error) {
+    modeLabel.textContent = "Local config";
   }
 }
 
@@ -367,6 +380,11 @@ async function createRoom() {
   connect(currentRoom);
 }
 
+async function init() {
+  await loadConnectionConfig();
+  createRoom();
+}
+
 newRoom.addEventListener("click", createRoom);
 copyLink.addEventListener("click", copyRoomLink);
-createRoom();
+init();

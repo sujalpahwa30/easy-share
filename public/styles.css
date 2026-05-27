@@ -161,6 +161,31 @@ body {
   text-transform: uppercase;
 }
 
+.trust-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.trust-row.compact {
+  margin-top: 10px;
+}
+
+.trust-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  border: 1px solid rgba(15, 118, 110, 0.2);
+  border-radius: 999px;
+  padding: 5px 10px;
+  background: var(--status-bg);
+  color: var(--green-dark);
+  font-size: 0.78rem;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
 h1,
 h2 {
   margin: 0;
@@ -863,5 +888,82 @@ progress::-moz-progress-bar {
     width: 48px;
     height: 48px;
     border-radius: 14px;
+  }
+}
+
+@media (max-width: 540px) {
+  .shell {
+    width: 100%;
+    padding: 0;
+  }
+
+  .projector,
+  .sender {
+    min-height: 100vh;
+  }
+
+  .topbar,
+  .room-layout,
+  .send-card {
+    margin: 0;
+  }
+
+  .topbar {
+    padding: 18px 16px 12px;
+  }
+
+  .room-layout {
+    gap: 12px;
+  }
+
+  .qr-panel,
+  .transfer-panel,
+  .send-card {
+    border-right: 0;
+    border-left: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .send-card {
+    min-height: 100vh;
+    padding: 20px 16px;
+  }
+
+  h1 {
+    font-size: clamp(2rem, 13vw, 3.3rem);
+    line-height: 1;
+  }
+
+  .top-actions,
+  .send-actions {
+    justify-content: flex-start;
+  }
+
+  .icon-button {
+    width: 48px;
+    height: 48px;
+  }
+
+  .dropzone {
+    min-height: 178px;
+    padding: 18px;
+  }
+
+  .queue-row {
+    grid-template-columns: 1fr;
+  }
+
+  .trust-row {
+    gap: 6px;
+  }
+
+  .trust-pill {
+    min-height: 28px;
+    font-size: 0.74rem;
+  }
+
+  .transfer-panel {
+    min-height: auto;
   }
 }

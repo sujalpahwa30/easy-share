@@ -15,8 +15,11 @@ const fileAlphabet = "0123456789abcdefghijklmnopqrstuvwxyz";
 const ROOM_TTL_MS = 20 * 60 * 1000;
 const FILE_TTL_MS = 15 * 60 * 1000;
 const MAX_FILE_BYTES = 150 * 1024 * 1024;
+const FALLBACK_CHUNK_BYTES = 1024 * 1024;
+const UPLOAD_TTL_MS = 15 * 60 * 1000;
 
 const rooms = new Map();
+const defaultIceServers = [{ urls: "stun:stun.l.google.com:19302" }];
 
 function randomId(alphabet, length) {
   let value = "";
@@ -68,6 +71,30 @@ function publicBaseUrl(req) {
   return `${proto}://${host}`;
 }
 
+function iceServers() {
+  if (process.env.EASYSHARE_ICE_SERVERS) {
+    try {
+      const parsed = JSON.parse(process.env.EASYSHARE_ICE_SERVERS);
+      if (Array.isArray(parsed) && parsed.length) return parsed;
+    } catch (error) {
+      console.warn("Ignoring invalid EASYSHARE_ICE_SERVERS JSON:", error.message);
+    }
+  }
+
+  if (process.env.TURN_URL) {
+    return [
+      ...defaultIceServers,
+      {
+        urls: process.env.TURN_URL,
+        username: process.env.TURN_USERNAME || undefined,
+        credential: process.env.TURN_CREDENTIAL || undefined,
+      },
+    ];
+  }
+
+  return defaultIceServers;
+}
+
 function ensureRoom(id) {
   const room = rooms.get(id);
   if (!room || room.expiresAt < Date.now()) {
@@ -87,6 +114,21 @@ function fileInfo(room, file) {
     expiresAt: file.expiresAt,
     downloadUrl: `/api/rooms/${room.id}/files/${file.id}`,
     mode: "relay",
+  };
+}
+
+function makeStoredFile(original) {
+  const data = Buffer.isBuffer(original.data) ? original.data : Buffer.concat(original.chunks);
+
+  return {
+    id: randomId(fileAlphabet, 12),
+    name: path.basename(original.name || "transfer.bin"),
+    type: original.type || "application/octet-stream",
+    size: data.length,
+    data,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + FILE_TTL_MS,
+    checksum: crypto.createHash("sha256").update(data).digest("hex"),
   };
 }
 
@@ -120,7 +162,10 @@ function sweepExpired() {
     for (const [fid, file] of room.files) {
       if (file.expiresAt < now) room.files.delete(fid);
     }
-    if (room.expiresAt < now || (room.peers.size === 0 && room.files.size === 0)) {
+    for (const [uid, uploadSession] of room.uploads) {
+      if (uploadSession.expiresAt < now) room.uploads.delete(uid);
+    }
+    if (room.expiresAt < now || (room.peers.size === 0 && room.files.size === 0 && room.uploads.size === 0)) {
       rooms.delete(id);
     }
   }
@@ -140,6 +185,24 @@ app.use(express.static(path.join(__dirname, "public")));
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: MAX_FILE_BYTES },
+});
+
+const chunkUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: FALLBACK_CHUNK_BYTES + 64 * 1024 },
+});
+
+app.get("/api/config", (req, res) => {
+  res.json({
+    appName: "EasyShare",
+    baseUrl: publicBaseUrl(req),
+    maxFileBytes: MAX_FILE_BYTES,
+    roomTtlMs: ROOM_TTL_MS,
+    fileTtlMs: FILE_TTL_MS,
+    fallbackChunkBytes: FALLBACK_CHUNK_BYTES,
+    iceServers: iceServers(),
+    relayFallback: true,
+  });
 });
 
 app.post("/api/rooms", async (req, res, next) => {
@@ -165,6 +228,7 @@ app.post("/api/rooms", async (req, res, next) => {
       expiresAt: Date.now() + ROOM_TTL_MS,
       peers: new Map(),
       files: new Map(),
+      uploads: new Map(),
     };
     rooms.set(id, room);
 
@@ -185,20 +249,122 @@ app.post("/api/rooms/:id/files", upload.single("file"), (req, res) => {
   if (!room) return res.status(404).json({ error: "Room not found or expired." });
   if (!req.file) return res.status(400).json({ error: "Choose a file first." });
 
-  const safeName = path.basename(req.file.originalname || "transfer.bin");
-  const id = randomId(fileAlphabet, 12);
-  const file = {
-    id,
-    name: safeName,
+  const file = makeStoredFile({
+    name: req.file.originalname,
     type: req.file.mimetype || "application/octet-stream",
-    size: req.file.size,
     data: req.file.buffer,
-    createdAt: Date.now(),
-    expiresAt: Date.now() + FILE_TTL_MS,
-    checksum: crypto.createHash("sha256").update(req.file.buffer).digest("hex"),
-  };
+  });
 
-  room.files.set(id, file);
+  room.files.set(file.id, file);
+  broadcast(room, { type: "file:created", file: fileInfo(room, file) });
+  res.status(201).json({
+    ...fileInfo(room, file),
+    checksum: file.checksum,
+  });
+});
+
+app.post("/api/rooms/:id/uploads", (req, res) => {
+  const room = ensureRoom(req.params.id.toUpperCase());
+  if (!room) return res.status(404).json({ error: "Room not found or expired." });
+
+  const name = path.basename(String(req.body.name || "transfer.bin"));
+  const type = String(req.body.type || "application/octet-stream");
+  const size = Number(req.body.size);
+  const totalChunks = Number(req.body.totalChunks);
+  const expectedChunks = Math.ceil(size / FALLBACK_CHUNK_BYTES);
+
+  if (!Number.isSafeInteger(size) || size <= 0 || size > MAX_FILE_BYTES) {
+    return res.status(400).json({ error: "Invalid file size." });
+  }
+
+  if (!Number.isSafeInteger(totalChunks) || totalChunks !== expectedChunks) {
+    return res.status(400).json({ error: "Invalid chunk count." });
+  }
+
+  const id = randomId(fileAlphabet, 12);
+  room.uploads.set(id, {
+    id,
+    name,
+    type,
+    size,
+    totalChunks,
+    chunks: new Map(),
+    receivedBytes: 0,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + UPLOAD_TTL_MS,
+  });
+
+  res.status(201).json({
+    id,
+    chunkBytes: FALLBACK_CHUNK_BYTES,
+    expiresAt: Date.now() + UPLOAD_TTL_MS,
+  });
+});
+
+app.post("/api/rooms/:id/uploads/:uploadId/chunks", chunkUpload.single("chunk"), (req, res) => {
+  const room = ensureRoom(req.params.id.toUpperCase());
+  if (!room) return res.status(404).json({ error: "Room not found or expired." });
+
+  const uploadSession = room.uploads.get(req.params.uploadId);
+  if (!uploadSession || uploadSession.expiresAt < Date.now()) {
+    if (uploadSession) room.uploads.delete(uploadSession.id);
+    return res.status(404).json({ error: "Upload session not found or expired." });
+  }
+
+  if (!req.file) return res.status(400).json({ error: "Missing chunk." });
+
+  const index = Number(req.body.index);
+  if (!Number.isSafeInteger(index) || index < 0 || index >= uploadSession.totalChunks) {
+    return res.status(400).json({ error: "Invalid chunk index." });
+  }
+
+  if (!uploadSession.chunks.has(index)) {
+    uploadSession.chunks.set(index, req.file.buffer);
+    uploadSession.receivedBytes += req.file.size;
+  }
+
+  res.json({
+    id: uploadSession.id,
+    receivedChunks: uploadSession.chunks.size,
+    totalChunks: uploadSession.totalChunks,
+    receivedBytes: uploadSession.receivedBytes,
+  });
+});
+
+app.post("/api/rooms/:id/uploads/:uploadId/complete", (req, res) => {
+  const room = ensureRoom(req.params.id.toUpperCase());
+  if (!room) return res.status(404).json({ error: "Room not found or expired." });
+
+  const uploadSession = room.uploads.get(req.params.uploadId);
+  if (!uploadSession || uploadSession.expiresAt < Date.now()) {
+    if (uploadSession) room.uploads.delete(uploadSession.id);
+    return res.status(404).json({ error: "Upload session not found or expired." });
+  }
+
+  if (uploadSession.chunks.size !== uploadSession.totalChunks) {
+    return res.status(409).json({ error: "Upload is missing chunks." });
+  }
+
+  const chunks = [];
+  for (let index = 0; index < uploadSession.totalChunks; index += 1) {
+    const chunk = uploadSession.chunks.get(index);
+    if (!chunk) return res.status(409).json({ error: "Upload is missing chunks." });
+    chunks.push(chunk);
+  }
+
+  const file = makeStoredFile({
+    name: uploadSession.name,
+    type: uploadSession.type,
+    chunks,
+  });
+
+  if (file.size !== uploadSession.size) {
+    room.uploads.delete(uploadSession.id);
+    return res.status(400).json({ error: "Uploaded file size does not match." });
+  }
+
+  room.files.set(file.id, file);
+  room.uploads.delete(uploadSession.id);
   broadcast(room, { type: "file:created", file: fileInfo(room, file) });
   res.status(201).json({
     ...fileInfo(room, file),
@@ -282,6 +448,7 @@ wss.on("connection", (socket, req) => {
     joinedAt: Date.now(),
     lastSeen: Date.now(),
   };
+  socket.isAlive = true;
 
   room.peers.set(peer.id, peer);
   send(socket, { type: "socket:ready", peer: { id: peer.id, role: peer.role }, room: roomSummary(room) });
@@ -313,8 +480,25 @@ wss.on("connection", (socket, req) => {
     });
   });
 
+  socket.on("pong", () => {
+    socket.isAlive = true;
+    peer.lastSeen = Date.now();
+  });
+
   socket.on("close", () => {
     room.peers.delete(peer.id);
     broadcast(room, { type: "peer:left", peerId: peer.id });
   });
 });
+
+setInterval(() => {
+  for (const socket of wss.clients) {
+    if (socket.isAlive === false) {
+      socket.terminate();
+      continue;
+    }
+
+    socket.isAlive = false;
+    socket.ping();
+  }
+}, 30_000).unref();

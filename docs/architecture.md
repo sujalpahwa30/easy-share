@@ -22,6 +22,8 @@ This codebase uses a WebRTC-first design:
 
 The Node server does not store file bytes in the direct path.
 
+The relay fallback now uses upload sessions and 1 MB chunks. If one chunk fails, the sender retries that chunk instead of restarting the entire file.
+
 ## Interaction Features
 
 - QR pairing with a visible room code.
@@ -36,11 +38,57 @@ The Node server does not store file bytes in the direct path.
 
 WebRTC is the right default because file bytes move peer-to-peer, but real campus networks can block peer-to-peer paths through firewall rules, client isolation, captive portals, or strict NAT behavior. For that reason the old temporary relay path remains:
 
-- `POST /api/rooms/:roomId/files` uploads a file into memory.
+- `POST /api/rooms/:roomId/uploads` creates an upload session.
+- `POST /api/rooms/:roomId/uploads/:uploadId/chunks` uploads retryable file chunks.
+- `POST /api/rooms/:roomId/uploads/:uploadId/complete` assembles the file and announces it to the receiver.
 - `GET /api/rooms/:roomId/files/:fileId` downloads it on the projector.
 - Files expire quickly and can be removed from the projector screen.
 
 This fallback is intentionally basic. In production it should move from memory to encrypted temporary object storage.
+
+## Same Wi-Fi vs Different Networks
+
+When EasyShare runs on your laptop at `localhost`, phones can only open the QR link if they can reach that laptop over the network. In practice that usually means both devices are on the same Wi-Fi and Windows Firewall allows Node.js.
+
+To work across different networks, EasyShare must run at a public HTTPS URL:
+
+1. Deploy the Node server to a public host.
+2. Set `PUBLIC_BASE_URL` to that public URL.
+3. Configure a TURN server so WebRTC can relay through strict NAT/firewall networks.
+4. Keep the existing relay fallback for cases where direct WebRTC still fails.
+
+The app now exposes `/api/config` so browsers receive ICE server settings from the backend. Configure TURN with either:
+
+- `TURN_URL`, `TURN_USERNAME`, and `TURN_CREDENTIAL`
+- `EASYSHARE_ICE_SERVERS` as full JSON for multiple STUN/TURN servers
+
+Example:
+
+```powershell
+$env:PUBLIC_BASE_URL="https://easyshare.example.com"
+$env:TURN_URL="turn:turn.example.com:3478"
+$env:TURN_USERNAME="easyshare-user"
+$env:TURN_CREDENTIAL="easyshare-password"
+npm start
+```
+
+For quick demos without deployment, use a secure tunnel such as Cloudflare Tunnel or ngrok and set `PUBLIC_BASE_URL` to the generated HTTPS URL.
+
+## Possible File Tool Features
+
+These features fit EasyShare if they stay lightweight and task-oriented:
+
+- Merge PDFs before sending.
+- Split or compress PDFs.
+- Convert images to PDF.
+- Rename files before transfer.
+- Bundle multiple files into a ZIP.
+- Preview PDFs/images on the receiver before download.
+- One-click "open presentation" for PDF/PPT/PPTX on the receiver.
+- Basic image compression for large photos.
+- Expiring transfer history for the current room.
+
+Avoid full document editing at first. Editing PPT, DOCX, PDF, audio, and video inside the browser is a much larger product. A better path is to add small utilities around the transfer workflow: merge, compress, rename, preview, and bundle.
 
 ## Design Principles
 

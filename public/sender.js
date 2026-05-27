@@ -15,7 +15,10 @@ const beam = document.querySelector(".beam");
 const chunkSize = 64 * 1024;
 const highWaterMark = 8 * 1024 * 1024;
 const lowWaterMark = 2 * 1024 * 1024;
-const iceServers = [{ urls: "stun:stun.l.google.com:19302" }];
+const maxChunkRetries = 3;
+let iceServers = [{ urls: "stun:stun.l.google.com:19302" }];
+let fallbackChunkSize = 1024 * 1024;
+let maxFileBytes = 150 * 1024 * 1024;
 
 let socket;
 let selfPeerId;
@@ -63,6 +66,25 @@ function socketSend(message) {
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function loadConnectionConfig() {
+  try {
+    const response = await fetch("/api/config");
+    if (!response.ok) return;
+    const config = await response.json();
+    if (Array.isArray(config.iceServers) && config.iceServers.length) {
+      iceServers = config.iceServers;
+    }
+    if (Number.isSafeInteger(config.fallbackChunkBytes) && config.fallbackChunkBytes > 0) {
+      fallbackChunkSize = config.fallbackChunkBytes;
+    }
+    if (Number.isSafeInteger(config.maxFileBytes) && config.maxFileBytes > 0) {
+      maxFileBytes = config.maxFileBytes;
+    }
+  } catch (_error) {
+    setMode("Local config");
+  }
 }
 
 function renderQueue() {
@@ -115,9 +137,17 @@ function renderQueue() {
 }
 
 function setSelectedFiles(items) {
-  selectedFiles = [...items].filter((item) => item && item.size >= 0);
+  const incoming = [...items].filter((item) => item && item.size > 0);
+  const accepted = incoming.filter((item) => item.size <= maxFileBytes);
+  const rejected = incoming.length - accepted.length;
+
+  selectedFiles = accepted;
   setProgress(0);
-  result.textContent = selectedFiles.length ? "Ready to send." : "";
+  result.textContent = rejected
+    ? `${rejected} file${rejected === 1 ? "" : "s"} skipped because the limit is ${formatBytes(maxFileBytes)}.`
+    : selectedFiles.length
+      ? "Ready to send."
+      : "";
   renderQueue();
 }
 
@@ -171,18 +201,25 @@ async function sendDirectFile(selectedFile, index, totalFiles, overallSent, over
   return overallSent + selectedFile.size;
 }
 
-function sendFallbackFile(selectedFile, index, totalFiles, overallSent, overallBytes) {
-  return new Promise((resolve, reject) => {
-    const body = new FormData();
-    body.append("file", selectedFile);
+async function postJson(url, body) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || "Request failed.");
+  return payload;
+}
 
+function uploadChunk(url, formData, onProgress) {
+  return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
-    request.open("POST", `/api/rooms/${roomId}/files`);
+    request.open("POST", url);
 
     request.upload.addEventListener("progress", (event) => {
       if (!event.lengthComputable) return;
-      const nextTotal = overallSent + event.loaded;
-      setProgress(overallBytes ? Math.round((nextTotal / overallBytes) * 100) : 100);
+      onProgress(event.loaded);
     });
 
     request.addEventListener("load", () => {
@@ -198,13 +235,58 @@ function sendFallbackFile(selectedFile, index, totalFiles, overallSent, overallB
         return;
       }
 
-      result.textContent = `Sent ${index + 1} of ${totalFiles} through fallback.`;
-      resolve(overallSent + selectedFile.size);
+      resolve(payload);
     });
 
     request.addEventListener("error", () => reject(new Error("Network error while uploading.")));
-    request.send(body);
+    request.send(formData);
   });
+}
+
+async function uploadChunkWithRetry(uploadId, chunkIndex, chunk, onProgress) {
+  let lastError;
+
+  for (let attempt = 0; attempt < maxChunkRetries; attempt += 1) {
+    try {
+      const body = new FormData();
+      body.append("index", String(chunkIndex));
+      body.append("chunk", chunk, `chunk-${chunkIndex}`);
+      return await uploadChunk(`/api/rooms/${roomId}/uploads/${uploadId}/chunks`, body, onProgress);
+    } catch (error) {
+      lastError = error;
+      await wait(350 * 2 ** attempt);
+    }
+  }
+
+  throw lastError || new Error("Chunk upload failed.");
+}
+
+async function sendFallbackFile(selectedFile, index, totalFiles, overallSent, overallBytes) {
+  const totalChunks = Math.ceil(selectedFile.size / fallbackChunkSize);
+  const uploadSession = await postJson(`/api/rooms/${roomId}/uploads`, {
+    name: selectedFile.name,
+    type: selectedFile.type || "application/octet-stream",
+    size: selectedFile.size,
+    totalChunks,
+  });
+
+  let offset = 0;
+  for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
+    const chunk = selectedFile.slice(offset, offset + fallbackChunkSize);
+    result.textContent = `Uploading ${index + 1} of ${totalFiles}: chunk ${chunkIndex + 1} of ${totalChunks}`;
+
+    await uploadChunkWithRetry(uploadSession.id, chunkIndex, chunk, (loaded) => {
+      const nextTotal = overallSent + offset + loaded;
+      setProgress(overallBytes ? Math.round((nextTotal / overallBytes) * 100) : 100);
+    });
+
+    offset += chunk.size;
+    setProgress(overallBytes ? Math.round(((overallSent + offset) / overallBytes) * 100) : 100);
+  }
+
+  await postJson(`/api/rooms/${roomId}/uploads/${uploadSession.id}/complete`, {});
+  result.textContent = `Sent ${index + 1} of ${totalFiles} through fallback.`;
+  return overallSent + selectedFile.size;
 }
 
 async function ensureDirectOrFallback() {
@@ -377,5 +459,10 @@ form.addEventListener("submit", async (event) => {
   await sendQueue();
 });
 
-renderQueue();
-connect();
+async function init() {
+  renderQueue();
+  await loadConnectionConfig();
+  connect();
+}
+
+init();
